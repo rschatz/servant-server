@@ -9,11 +9,11 @@ module Servant.Server.Internal where
 
 import Control.Applicative ((<$>))
 import Control.Monad.Trans.Either (EitherT, runEitherT)
-import Data.Aeson (ToJSON, FromJSON, encode, decode')
+import Data.Aeson (ToJSON, FromJSON, decode')
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Monoid (Monoid, mempty, mappend)
 import Data.Proxy (Proxy(Proxy))
 import Data.String (fromString)
@@ -22,10 +22,13 @@ import Data.Text.Encoding (decodeUtf8)
 import Data.Text (Text)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import Network.HTTP.Types hiding (Header)
-import Network.Wai (Response, Request, ResponseReceived, Application, pathInfo, requestBody,
-                    strictRequestBody, lazyRequestBody, requestHeaders, requestMethod,
+import Network.Wai ( Response, Request, ResponseReceived, Application
+                   , pathInfo, requestBody, strictRequestBody
+                   , lazyRequestBody, requestHeaders, requestMethod,
                     rawQueryString, responseLBS)
-import Servant.API (QueryParams, QueryParam, QueryFlag, ReqBody, Header, Capture, Get, Delete, Put, Post, Raw, (:>), (:<|>)(..))
+import Servant.API ( QueryParams, QueryParam, QueryFlag, ReqBody, Header
+                   , Capture, Get, Delete, Put, Post, Raw, (:>), (:<|>)(..))
+import Servant.Server.ContentTypes (AllCTRender(..), AcceptHeader(..))
 import Servant.Common.Text (FromText, fromText)
 
 data ReqBodyState = Uncalled
@@ -231,14 +234,19 @@ instance HasServer Delete where
 -- If successfully returning a value, we just require that its type has
 -- a 'ToJSON' instance and servant takes care of encoding it for you,
 -- yielding status code 200 along the way.
-instance ToJSON result => HasServer (Get result) where
-  type Server (Get result) = EitherT (Int, String) IO result
+instance ( AllCTRender ctypes a, ToJSON a
+         ) => HasServer (Get ctypes a) where
+  type Server (Get ctypes a) = EitherT (Int, String) IO a
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodGet = do
         e <- runEitherT action
         respond . succeedWith $ case e of
-          Right output ->
-            responseLBS ok200 [("Content-Type", "application/json")] (encode output)
+          Right output -> do
+            let accH = fromMaybe "*/*" $ lookup hAccept $ requestHeaders request
+            case handleAcceptH (Proxy :: Proxy ctypes) (AcceptHeader accH) output of
+              Nothing -> responseLBS (mkStatus 406 "") [] ""
+              Just (contentT, body) -> responseLBS ok200 [ ("Content-Type"
+                                                         , cs contentT)] body
           Left (status, message) ->
             responseLBS (mkStatus status (cs message)) [] (cs message)
     | pathIsEmpty request && requestMethod request /= methodGet =
@@ -288,15 +296,20 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 -- If successfully returning a value, we just require that its type has
 -- a 'ToJSON' instance and servant takes care of encoding it for you,
 -- yielding status code 201 along the way.
-instance ToJSON a => HasServer (Post a) where
-  type Server (Post a) = EitherT (Int, String) IO a
+instance ( AllCTRender ctypes a, ToJSON a
+         )=> HasServer (Post ctypes a) where
+  type Server (Post ctypes a) = EitherT (Int, String) IO a
 
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodPost = do
         e <- runEitherT action
         respond . succeedWith $ case e of
-          Right out ->
-            responseLBS status201 [("Content-Type", "application/json")] (encode out)
+          Right output -> do
+            let accH = fromMaybe "*/*" $ lookup hAccept $ requestHeaders request
+            case handleAcceptH (Proxy :: Proxy ctypes) (AcceptHeader accH) output of
+              Nothing -> responseLBS (mkStatus 406 "") [] ""
+              Just (contentT, body) -> responseLBS status201 [ ("Content-Type"
+                                                             , cs contentT)] body
           Left (status, message) ->
             responseLBS (mkStatus status (cs message)) [] (cs message)
     | pathIsEmpty request && requestMethod request /= methodPost =
@@ -314,15 +327,20 @@ instance ToJSON a => HasServer (Post a) where
 -- If successfully returning a value, we just require that its type has
 -- a 'ToJSON' instance and servant takes care of encoding it for you,
 -- yielding status code 200 along the way.
-instance ToJSON a => HasServer (Put a) where
-  type Server (Put a) = EitherT (Int, String) IO a
+instance ( AllCTRender ctypes a, ToJSON a
+         ) => HasServer (Put ctypes a) where
+  type Server (Put ctypes a) = EitherT (Int, String) IO a
 
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodPut = do
         e <- runEitherT action
         respond . succeedWith $ case e of
-          Right out ->
-            responseLBS ok200 [("Content-Type", "application/json")] (encode out)
+          Right output -> do
+            let accH = fromMaybe "*/*" $ lookup hAccept $ requestHeaders request
+            case handleAcceptH (Proxy :: Proxy ctypes) (AcceptHeader accH) output of
+              Nothing -> responseLBS (mkStatus 406 "") [] ""
+              Just (contentT, body) -> responseLBS status200 [ ("Content-Type"
+                                                             , cs contentT)] body
           Left (status, message) ->
             responseLBS (mkStatus status (cs message)) [] (cs message)
     | pathIsEmpty request && requestMethod request /= methodPut =
