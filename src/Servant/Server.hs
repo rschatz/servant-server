@@ -1,16 +1,20 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE Rank2Types #-}
 
 -- | This module lets you implement 'Server's for defined APIs. You'll
 -- most likely just need 'serve'.
 module Servant.Server
   ( -- * Implementing an API
-    serve
+    serve,
+    serveT
 
   , -- * Handlers for all standard combinators
-    HasServer(..)
+    HasServer(..),
+    Server
   ) where
 
+import Control.Monad.IO.Class (MonadIO)
 import Data.Proxy (Proxy)
 import Network.Wai (Application)
 
@@ -39,5 +43,8 @@ import Servant.Server.Internal
 -- >
 -- > main :: IO ()
 -- > main = Network.Wai.Handler.Warp.run 8080 app
-serve :: HasServer layout => Proxy layout -> Server layout -> Application
-serve p server = toApplication (route p server)
+serve :: (HasServer layout m, m ~ IO) => Proxy layout -> Server layout -> Application
+serve = serveT id
+
+serveT :: (HasServer layout m, MonadIO m) => (forall a. m a -> IO a) -> Proxy layout -> ServerT layout m -> Application
+serveT run p server = toApplication (route p server) run

@@ -5,9 +5,12 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE Rank2Types #-}
 module Servant.Server.Internal where
 
 import Control.Applicative ((<$>))
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Either (EitherT, runEitherT)
 import Data.Aeson (ToJSON, FromJSON, encode, eitherDecode')
 import qualified Data.ByteString as B
@@ -34,8 +37,8 @@ data ReqBodyState = Uncalled
                   | Called !B.ByteString
                   | Done !B.ByteString
 
-toApplication :: RoutingApplication -> Application
-toApplication ra request respond = do
+toApplication :: MonadIO m => RoutingApplication m -> (forall a. m a -> IO a) -> Application
+toApplication ra run request respond = do
   reqBodyRef <- newIORef Uncalled
   -- We may need to consume the requestBody more than once.  In order to
   -- maintain the illusion that 'requestBody' works as expected,
@@ -57,7 +60,7 @@ toApplication ra request respond = do
                 writeIORef reqBodyRef $ Called bs
                 return B.empty
 
-  ra request{ requestBody = memoReqBody } (routingRespond . routeResult)
+  run $ ra request{ requestBody = memoReqBody } (liftIO . routingRespond . routeResult)
  where
   routingRespond :: Either RouteMismatch Response -> IO ResponseReceived
   routingRespond (Left NotFound) =
@@ -127,9 +130,9 @@ instance Monoid (RouteResult a) where
   RR (Left _)  `mappend` RR (Right y) = RR $ Right y
   r            `mappend` _            = r
 
-type RoutingApplication =
+type RoutingApplication m =
      Request -- ^ the request, the field 'pathInfo' may be modified by url routing
-  -> (RouteResult Response -> IO ResponseReceived) -> IO ResponseReceived
+  -> (RouteResult Response -> m ResponseReceived) -> m ResponseReceived
 
 splitMatrixParameters :: Text -> (Text, Text)
 splitMatrixParameters = T.break (== ';')
@@ -152,10 +155,11 @@ processedPathInfo r =
     _                        -> pinfo
   where pinfo = parsePathInfo r
 
-class HasServer layout where
-  type Server layout :: *
-  route :: Proxy layout -> Server layout -> RoutingApplication
+class Monad m => HasServer layout m where
+  type ServerT layout m :: *
+  route :: Proxy layout -> ServerT layout m -> RoutingApplication m
 
+type Server layout = ServerT layout IO
 
 
 -- * Instances
@@ -171,8 +175,8 @@ class HasServer layout where
 -- > server = listAllBooks :<|> postBook
 -- >   where listAllBooks = ...
 -- >         postBook book = ...
-instance (HasServer a, HasServer b) => HasServer (a :<|> b) where
-  type Server (a :<|> b) = Server a :<|> Server b
+instance (HasServer a m, HasServer b m) => HasServer (a :<|> b) m where
+  type ServerT (a :<|> b) m = ServerT a m :<|> ServerT b m
   route Proxy (a :<|> b) request respond =
     route pa a request $ \ mResponse ->
       if isMismatch mResponse
@@ -202,11 +206,11 @@ captured _ = fromText
 -- > server = getBook
 -- >   where getBook :: Text -> EitherT (Int, String) IO Book
 -- >         getBook isbn = ...
-instance (KnownSymbol capture, FromText a, HasServer sublayout)
-      => HasServer (Capture capture a :> sublayout) where
+instance (KnownSymbol capture, FromText a, HasServer sublayout m)
+      => HasServer (Capture capture a :> sublayout) m where
 
-  type Server (Capture capture a :> sublayout) =
-     a -> Server sublayout
+  type ServerT (Capture capture a :> sublayout) m =
+     a -> ServerT sublayout m
 
   route Proxy subserver request respond = case processedPathInfo request of
     (first : rest)
@@ -231,8 +235,8 @@ instance (KnownSymbol capture, FromText a, HasServer sublayout)
 -- to be returned. You can use 'Control.Monad.Trans.Either.left' to
 -- painlessly error out if the conditions for a successful deletion
 -- are not met.
-instance HasServer Delete where
-  type Server Delete = EitherT (Int, String) IO ()
+instance Monad m => HasServer Delete m where
+  type ServerT Delete m = EitherT (Int, String) m ()
 
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodDelete = do
@@ -257,8 +261,8 @@ instance HasServer Delete where
 -- If successfully returning a value, we just require that its type has
 -- a 'ToJSON' instance and servant takes care of encoding it for you,
 -- yielding status code 200 along the way.
-instance ToJSON result => HasServer (Get result) where
-  type Server (Get result) = EitherT (Int, String) IO result
+instance (Monad m, ToJSON result) => HasServer (Get result) m where
+  type ServerT (Get result) m = EitherT (Int, String) m result
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodGet = do
         e <- runEitherT action
@@ -291,11 +295,11 @@ instance ToJSON result => HasServer (Get result) where
 -- > server = viewReferer
 -- >   where viewReferer :: Referer -> EitherT (Int, String) IO referer
 -- >         viewReferer referer = return referer
-instance (KnownSymbol sym, FromText a, HasServer sublayout)
-      => HasServer (Header sym a :> sublayout) where
+instance (KnownSymbol sym, FromText a, HasServer sublayout m)
+      => HasServer (Header sym a :> sublayout) m where
 
-  type Server (Header sym a :> sublayout) =
-    Maybe a -> Server sublayout
+  type ServerT (Header sym a :> sublayout) m =
+    Maybe a -> ServerT sublayout m
 
   route Proxy subserver request respond = do
     let mheader = fromText . decodeUtf8 =<< lookup str (requestHeaders request)
@@ -314,8 +318,8 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 -- If successfully returning a value, we just require that its type has
 -- a 'ToJSON' instance and servant takes care of encoding it for you,
 -- yielding status code 201 along the way.
-instance ToJSON a => HasServer (Post a) where
-  type Server (Post a) = EitherT (Int, String) IO a
+instance (Monad m, ToJSON a) => HasServer (Post a) m where
+  type ServerT (Post a) m = EitherT (Int, String) m a
 
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodPost = do
@@ -340,8 +344,8 @@ instance ToJSON a => HasServer (Post a) where
 -- If successfully returning a value, we just require that its type has
 -- a 'ToJSON' instance and servant takes care of encoding it for you,
 -- yielding status code 200 along the way.
-instance ToJSON a => HasServer (Put a) where
-  type Server (Put a) = EitherT (Int, String) IO a
+instance (Monad m, ToJSON a) => HasServer (Put a) m where
+  type ServerT (Put a) m = EitherT (Int, String) m a
 
   route Proxy action request respond
     | pathIsEmpty request && requestMethod request == methodPut = do
@@ -377,11 +381,11 @@ instance ToJSON a => HasServer (Put a) where
 -- >   where getBooksBy :: Maybe Text -> EitherT (Int, String) IO [Book]
 -- >         getBooksBy Nothing       = ...return all books...
 -- >         getBooksBy (Just author) = ...return books by the given author...
-instance (KnownSymbol sym, FromText a, HasServer sublayout)
-      => HasServer (QueryParam sym a :> sublayout) where
+instance (KnownSymbol sym, FromText a, HasServer sublayout m)
+      => HasServer (QueryParam sym a :> sublayout) m where
 
-  type Server (QueryParam sym a :> sublayout) =
-    Maybe a -> Server sublayout
+  type ServerT (QueryParam sym a :> sublayout) m =
+    Maybe a -> ServerT sublayout m
 
   route Proxy subserver request respond = do
     let querytext = parseQueryText $ rawQueryString request
@@ -415,11 +419,11 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 -- > server = getBooksBy
 -- >   where getBooksBy :: [Text] -> EitherT (Int, String) IO [Book]
 -- >         getBooksBy authors = ...return all books by these authors...
-instance (KnownSymbol sym, FromText a, HasServer sublayout)
-      => HasServer (QueryParams sym a :> sublayout) where
+instance (KnownSymbol sym, FromText a, HasServer sublayout m)
+      => HasServer (QueryParams sym a :> sublayout) m where
 
-  type Server (QueryParams sym a :> sublayout) =
-    [a] -> Server sublayout
+  type ServerT (QueryParams sym a :> sublayout) m =
+    [a] -> ServerT sublayout m
 
   route Proxy subserver request respond = do
     let querytext = parseQueryText $ rawQueryString request
@@ -448,11 +452,11 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 -- > server = getBooks
 -- >   where getBooks :: Bool -> EitherT (Int, String) IO [Book]
 -- >         getBooks onlyPublished = ...return all books, or only the ones that are already published, depending on the argument...
-instance (KnownSymbol sym, HasServer sublayout)
-      => HasServer (QueryFlag sym :> sublayout) where
+instance (KnownSymbol sym, HasServer sublayout m)
+      => HasServer (QueryFlag sym :> sublayout) m where
 
-  type Server (QueryFlag sym :> sublayout) =
-    Bool -> Server sublayout
+  type ServerT (QueryFlag sym :> sublayout) m =
+    Bool -> ServerT sublayout m
 
   route Proxy subserver request respond = do
     let querytext = parseQueryText $ rawQueryString request
@@ -491,11 +495,11 @@ parseMatrixText = parseQueryText
 -- >   where getBooksBy :: Maybe Text -> EitherT (Int, String) IO [Book]
 -- >         getBooksBy Nothing       = ...return all books...
 -- >         getBooksBy (Just author) = ...return books by the given author...
-instance (KnownSymbol sym, FromText a, HasServer sublayout)
-      => HasServer (MatrixParam sym a :> sublayout) where
+instance (KnownSymbol sym, FromText a, HasServer sublayout m)
+      => HasServer (MatrixParam sym a :> sublayout) m where
 
-  type Server (MatrixParam sym a :> sublayout) =
-    Maybe a -> Server sublayout
+  type ServerT (MatrixParam sym a :> sublayout) m =
+    Maybe a -> ServerT sublayout m
 
   route Proxy subserver request respond = case parsePathInfo request of
     (first : _)
@@ -529,11 +533,11 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 -- > server = getBooksBy
 -- >   where getBooksBy :: [Text] -> EitherT (Int, String) IO [Book]
 -- >         getBooksBy authors = ...return all books by these authors...
-instance (KnownSymbol sym, FromText a, HasServer sublayout)
-      => HasServer (MatrixParams sym a :> sublayout) where
+instance (KnownSymbol sym, FromText a, HasServer sublayout m)
+      => HasServer (MatrixParams sym a :> sublayout) m where
 
-  type Server (MatrixParams sym a :> sublayout) =
-    [a] -> Server sublayout
+  type ServerT (MatrixParams sym a :> sublayout) m =
+    [a] -> ServerT sublayout m
 
   route Proxy subserver request respond = case parsePathInfo request of
     (first : _)
@@ -563,11 +567,11 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 -- > server = getBooks
 -- >   where getBooks :: Bool -> EitherT (Int, String) IO [Book]
 -- >         getBooks onlyPublished = ...return all books, or only the ones that are already published, depending on the argument...
-instance (KnownSymbol sym, HasServer sublayout)
-      => HasServer (MatrixFlag sym :> sublayout) where
+instance (KnownSymbol sym, HasServer sublayout m)
+      => HasServer (MatrixFlag sym :> sublayout) m where
 
-  type Server (MatrixFlag sym :> sublayout) =
-    Bool -> Server sublayout
+  type ServerT (MatrixFlag sym :> sublayout) m =
+    Bool -> ServerT sublayout m
 
   route Proxy subserver request respond =  case parsePathInfo request of
     (first : _)
@@ -593,8 +597,8 @@ instance (KnownSymbol sym, HasServer sublayout)
 -- >
 -- > server :: Server MyApi
 -- > server = serveDirectory "/var/www/images"
-instance HasServer Raw where
-  type Server Raw = Application
+instance Monad m => HasServer Raw m where
+  type ServerT Raw m = Request -> (Response -> m ResponseReceived) -> m ResponseReceived
   route Proxy rawApplication request respond =
     rawApplication request (respond . succeedWith)
 
@@ -614,22 +618,22 @@ instance HasServer Raw where
 -- > server = postBook
 -- >   where postBook :: Book -> EitherT (Int, String) IO Book
 -- >         postBook book = ...insert into your db...
-instance (FromJSON a, HasServer sublayout)
-      => HasServer (ReqBody a :> sublayout) where
+instance (MonadIO m, FromJSON a, HasServer sublayout m)
+      => HasServer (ReqBody a :> sublayout) m where
 
-  type Server (ReqBody a :> sublayout) =
-    a -> Server sublayout
+  type ServerT (ReqBody a :> sublayout) m =
+    a -> ServerT sublayout m
 
   route Proxy subserver request respond = do
-    mrqbody <- eitherDecode' <$> lazyRequestBody request
+    mrqbody <- liftIO $ eitherDecode' <$> lazyRequestBody request
     case mrqbody of
       Left e -> respond . failWith $ InvalidBody e
       Right v  -> route (Proxy :: Proxy sublayout) (subserver v) request respond
 
 -- | Make sure the incoming request starts with @"/path"@, strip it and
 -- pass the rest of the request path to @sublayout@.
-instance (KnownSymbol path, HasServer sublayout) => HasServer (path :> sublayout) where
-  type Server (path :> sublayout) = Server sublayout
+instance (KnownSymbol path, HasServer sublayout m) => HasServer (path :> sublayout) m where
+  type ServerT (path :> sublayout) m = ServerT sublayout m
   route Proxy subserver request respond = case processedPathInfo request of
     (first : rest)
       | first == cs (symbolVal proxyPath)
