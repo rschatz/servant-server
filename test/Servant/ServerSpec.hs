@@ -8,7 +8,10 @@
 module Servant.ServerSpec where
 
 
+import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Either (EitherT, left)
+import Control.Monad.Trans.State (StateT, evalStateT)
+import qualified Control.Monad.Trans.State as State (modify, get)
 import Data.Aeson (ToJSON, FromJSON, encode, decode')
 import Data.Char (toUpper)
 import Data.Proxy (Proxy(Proxy))
@@ -30,7 +33,7 @@ import Servant.API.MatrixParam (MatrixParam, MatrixParams, MatrixFlag)
 import Servant.API.Raw (Raw)
 import Servant.API.Sub ((:>))
 import Servant.API.Alternative ((:<|>)((:<|>)))
-import Servant.Server (Server, serve)
+import Servant.Server (Server, ServerT, serve, serveT)
 
 
 -- * test data types
@@ -74,6 +77,7 @@ spec = do
   postSpec
   rawSpec
   unionSpec
+  monadSpec
 
 
 type CaptureApi = Capture "legs" Integer :> Get Animal
@@ -364,3 +368,21 @@ unionSpec = do
         liftIO $ do
           decode' (simpleBody response_) `shouldBe`
             Just jerry
+
+
+type MonadApi = "foo" :> Get Integer
+monadApi :: Proxy MonadApi
+monadApi = Proxy
+
+monadServer :: ServerT MonadApi (StateT Integer IO)
+monadServer = lift $ do
+  State.modify (+ 13)
+  State.modify (* 2)
+  State.get
+
+monadSpec :: Spec
+monadSpec = do
+  describe "serveT with StateT monad" $ do
+    with (return $ serveT (flip evalStateT 8) monadApi monadServer) $ do
+      it "runs monadic computations" $ do
+        get "/foo" `shouldRespondWith` "42"
