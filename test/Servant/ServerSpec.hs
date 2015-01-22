@@ -33,7 +33,7 @@ import Servant.API.MatrixParam (MatrixParam, MatrixParams, MatrixFlag)
 import Servant.API.Raw (Raw)
 import Servant.API.Sub ((:>))
 import Servant.API.Alternative ((:<|>)((:<|>)))
-import Servant.Server (Server, ServerT, serve, serveT)
+import Servant.Server (Server, ServerT, serve, serveT, enter)
 
 
 -- * test data types
@@ -78,6 +78,7 @@ spec = do
   rawSpec
   unionSpec
   monadSpec
+  enterSpec
 
 
 type CaptureApi = Capture "legs" Integer :> Get Animal
@@ -390,3 +391,23 @@ monadSpec = do
         get "/foo" `shouldRespondWith` "42"
         get "/foo" `shouldRespondWith` "42"
         get "/foo" `shouldRespondWith` "42"
+
+type EnterApi =
+       "bar" :> Get Integer
+  :<|> MonadApi
+enterApi :: Proxy EnterApi
+enterApi = Proxy
+
+enterServer :: Server EnterApi
+enterServer =
+       return 42
+  :<|> enter monadApi (flip evalStateT 6) monadServer
+
+enterSpec :: Spec
+enterSpec = do
+  describe "combined API with different monads" $ do
+    with (return $ serve enterApi enterServer) $ do
+      it "runs requests in the IO monad" $ do
+        get "/bar" `shouldRespondWith` "42"
+      it "runs requests in the State monad" $ do
+        get "/foo" `shouldRespondWith` "38"
