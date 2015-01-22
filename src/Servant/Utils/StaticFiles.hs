@@ -5,14 +5,12 @@
 --   directory on your filesystem.
 module Servant.Utils.StaticFiles (
   serveDirectory,
-  serveDirectoryT,
  ) where
 
-import Control.Monad.IO.Class (MonadIO, liftIO)
 import Filesystem.Path.CurrentOS (decodeString)
 import Network.Wai.Application.Static (staticApp, defaultFileServerSettings)
 import Servant.API.Raw (Raw)
-import Servant.Server.Internal (Server, ServerT)
+import Servant.Server.Internal (Server)
 
 -- | Serve anything under the specified directory as a 'Raw' endpoint.
 --
@@ -35,8 +33,5 @@ import Servant.Server.Internal (Server, ServerT)
 -- handler in the last position, because /servant/ will try to match the handlers
 -- in order.
 serveDirectory :: FilePath -> Server Raw
-serveDirectory = serveDirectoryT id
-
-serveDirectoryT :: MonadIO m => (forall a. m a -> IO a) -> FilePath -> ServerT Raw m
-serveDirectoryT run documentRoot req cont =
-  liftIO $ staticApp (defaultFileServerSettings (decodeString (documentRoot ++ "/"))) req (run . cont)
+serveDirectory documentRoot =
+  staticApp (defaultFileServerSettings (decodeString (documentRoot ++ "/")))
