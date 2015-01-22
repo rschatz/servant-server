@@ -43,8 +43,8 @@ import Servant.Server.Internal
 -- >
 -- > main :: IO ()
 -- > main = Network.Wai.Handler.Warp.run 8080 app
-serve :: (HasServer layout m, m ~ IO) => Proxy layout -> Server layout -> Application
+serve :: HasServer layout => Proxy layout -> Server layout -> Application
 serve = serveT id
 
-serveT :: (HasServer layout m, MonadIO m) => (forall a. m a -> IO a) -> Proxy layout -> ServerT layout m -> Application
+serveT :: (HasServer layout, MonadIO m) => (forall a. m a -> IO a) -> Proxy layout -> ServerT layout m -> Application
 serveT run p server = toApplication (route p server) run
