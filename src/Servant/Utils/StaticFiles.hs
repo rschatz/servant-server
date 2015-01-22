@@ -1,4 +1,3 @@
-{-# LANGUAGE Rank2Types #-}
 -- | This module defines a sever-side handler that lets you serve static files.
 --
 -- - 'serveDirectory' lets you serve anything that lives under a particular
