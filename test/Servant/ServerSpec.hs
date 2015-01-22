@@ -383,7 +383,7 @@ monadServer = lift $ do
 monadSpec :: Spec
 monadSpec = do
   describe "serveT with StateT monad" $ do
-    with (return $ serveT (flip evalStateT 8) monadApi monadServer) $ do
+    with (return $ serveT monadApi (flip evalStateT 8) monadServer) $ do
       it "runs monadic computations" $ do
         get "/foo" `shouldRespondWith` "42"
       it "state is local to requests" $ do

@@ -11,10 +11,10 @@ module Servant.Server
 
   , -- * Handlers for all standard combinators
     HasServer(..),
+    HasServerT(..),
     Server
   ) where
 
-import Control.Monad.IO.Class (MonadIO)
 import Data.Proxy (Proxy)
 import Network.Wai (Application)
 
@@ -44,7 +44,7 @@ import Servant.Server.Internal
 -- > main :: IO ()
 -- > main = Network.Wai.Handler.Warp.run 8080 app
 serve :: HasServer layout => Proxy layout -> Server layout -> Application
-serve = serveT id
+serve p server = toApplication (route p server)
 
-serveT :: (HasServer layout, MonadIO m) => (forall a. m a -> IO a) -> Proxy layout -> ServerT layout m -> Application
-serveT run p server = toApplication (route p server) run
+serveT :: HasServerT layout => Proxy layout -> (forall a. m a -> IO a) -> ServerT layout m -> Application
+serveT p run = serve p . enter p run

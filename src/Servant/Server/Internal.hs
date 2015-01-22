@@ -9,8 +9,7 @@
 module Servant.Server.Internal where
 
 import Control.Applicative ((<$>))
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Trans.Either (EitherT, runEitherT)
+import Control.Monad.Trans.Either (EitherT, runEitherT, mapEitherT)
 import Data.Aeson (ToJSON, FromJSON, encode, eitherDecode')
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -36,8 +35,8 @@ data ReqBodyState = Uncalled
                   | Called !B.ByteString
                   | Done !B.ByteString
 
-toApplication :: MonadIO m => RoutingApplication m -> (forall a. m a -> IO a) -> Application
-toApplication ra run request respond = do
+toApplication :: RoutingApplication -> Application
+toApplication ra request respond = do
   reqBodyRef <- newIORef Uncalled
   -- We may need to consume the requestBody more than once.  In order to
   -- maintain the illusion that 'requestBody' works as expected,
@@ -59,7 +58,7 @@ toApplication ra run request respond = do
                 writeIORef reqBodyRef $ Called bs
                 return B.empty
 
-  run $ ra request{ requestBody = memoReqBody } (liftIO . routingRespond . routeResult)
+  ra request{ requestBody = memoReqBody } (routingRespond . routeResult)
  where
   routingRespond :: Either RouteMismatch Response -> IO ResponseReceived
   routingRespond (Left NotFound) =
@@ -129,9 +128,9 @@ instance Monoid (RouteResult a) where
   RR (Left _)  `mappend` RR (Right y) = RR $ Right y
   r            `mappend` _            = r
 
-type RoutingApplication m =
+type RoutingApplication =
      Request -- ^ the request, the field 'pathInfo' may be modified by url routing
-  -> (RouteResult Response -> m ResponseReceived) -> m ResponseReceived
+  -> (RouteResult Response -> IO ResponseReceived) -> IO ResponseReceived
 
 splitMatrixParameters :: Text -> (Text, Text)
 splitMatrixParameters = T.break (== ';')
@@ -156,9 +155,12 @@ processedPathInfo r =
 
 class HasServer layout where
   type ServerT layout (m :: * -> *) :: *
-  route :: MonadIO m => Proxy layout -> ServerT layout m -> RoutingApplication m
+  route :: Proxy layout -> Server layout -> RoutingApplication
 
 type Server layout = ServerT layout IO
+
+class HasServer layout => HasServerT layout where
+  enter :: Proxy layout -> (forall a. m a -> n a) -> ServerT layout m -> ServerT layout n
 
 
 -- * Instances
@@ -181,6 +183,12 @@ instance (HasServer a, HasServer b) => HasServer (a :<|> b) where
       if isMismatch mResponse
         then route pb b request $ \mResponse' -> respond (mResponse <> mResponse')
         else respond mResponse
+
+    where pa = Proxy :: Proxy a
+          pb = Proxy :: Proxy b
+
+instance (HasServerT a, HasServerT b) => HasServerT (a :<|> b) where
+  enter Proxy run (a :<|> b) = enter pa run a :<|> enter pb run b
 
     where pa = Proxy :: Proxy a
           pb = Proxy :: Proxy b
@@ -221,6 +229,10 @@ instance (KnownSymbol capture, FromText a, HasServer sublayout)
     _ -> respond $ failWith NotFound
 
     where captureProxy = Proxy :: Proxy (Capture capture a)
+
+instance (KnownSymbol capture, FromText a, HasServerT sublayout)
+      => HasServerT (Capture capture a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
            
 
 -- | If you have a 'Delete' endpoint in your API,
@@ -249,6 +261,9 @@ instance HasServer Delete where
         respond $ failWith WrongMethod
     | otherwise = respond $ failWith NotFound
 
+instance HasServerT Delete where
+  enter Proxy run = mapEitherT run
+
 -- | When implementing the handler for a 'Get' endpoint,
 -- just like for 'Servant.API.Delete.Delete', 'Servant.API.Post.Post'
 -- and 'Servant.API.Put.Put', the handler code runs in the
@@ -273,6 +288,9 @@ instance ToJSON result => HasServer (Get result) where
     | pathIsEmpty request && requestMethod request /= methodGet =
         respond $ failWith WrongMethod
     | otherwise = respond $ failWith NotFound
+
+instance ToJSON result => HasServerT (Get result) where
+  enter Proxy run = mapEitherT run
 
 -- | If you use 'Header' in one of the endpoints for your API,
 -- this automatically requires your server-side handler to be a function
@@ -306,6 +324,10 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 
       where str = fromString $ symbolVal (Proxy :: Proxy sym)
 
+instance (KnownSymbol sym, FromText a, HasServerT sublayout)
+      => HasServerT (Header sym a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
+
 -- | When implementing the handler for a 'Post' endpoint,
 -- just like for 'Servant.API.Delete.Delete', 'Servant.API.Get.Get'
 -- and 'Servant.API.Put.Put', the handler code runs in the
@@ -331,6 +353,9 @@ instance ToJSON a => HasServer (Post a) where
     | pathIsEmpty request && requestMethod request /= methodPost =
         respond $ failWith WrongMethod
     | otherwise = respond $ failWith NotFound
+
+instance ToJSON a => HasServerT (Post a) where
+  enter Proxy run = mapEitherT run
 
 -- | When implementing the handler for a 'Put' endpoint,
 -- just like for 'Servant.API.Delete.Delete', 'Servant.API.Get.Get'
@@ -358,6 +383,9 @@ instance ToJSON a => HasServer (Put a) where
         respond $ failWith WrongMethod
 
     | otherwise = respond $ failWith NotFound
+
+instance ToJSON a => HasServerT (Put a) where
+  enter Proxy run = mapEitherT run
 
 -- | If you use @'QueryParam' "author" Text@ in one of the endpoints for your API,
 -- this automatically requires your server-side handler to be a function
@@ -399,6 +427,10 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 
     where paramname = cs $ symbolVal (Proxy :: Proxy sym)
 
+instance (KnownSymbol sym, FromText a, HasServerT sublayout)
+      => HasServerT (QueryParam sym a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
+
 -- | If you use @'QueryParams' "authors" Text@ in one of the endpoints for your API,
 -- this automatically requires your server-side handler to be a function
 -- that takes an argument of type @['Text']@.
@@ -439,6 +471,10 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
           convert Nothing = Nothing
           convert (Just v) = fromText v
 
+instance (KnownSymbol sym, FromText a, HasServerT sublayout)
+      => HasServerT (QueryParams sym a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
+
 -- | If you use @'QueryFlag' "published"@ in one of the endpoints for your API,
 -- this automatically requires your server-side handler to be a function
 -- that takes an argument of type 'Bool'.
@@ -469,6 +505,10 @@ instance (KnownSymbol sym, HasServer sublayout)
     where paramname = cs $ symbolVal (Proxy :: Proxy sym)
           examine v | v == "true" || v == "1" || v == "" = True
                     | otherwise = False
+
+instance (KnownSymbol sym, HasServerT sublayout)
+      => HasServerT (QueryFlag sym :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
 
 parseMatrixText :: B.ByteString -> QueryText
 parseMatrixText = parseQueryText
@@ -513,6 +553,10 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
 
     where paramname = cs $ symbolVal (Proxy :: Proxy sym)
 
+instance (KnownSymbol sym, FromText a, HasServerT sublayout)
+      => HasServerT (MatrixParam sym a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
+
 -- | If you use @'MatrixParams' "authors" Text@ in one of the endpoints for your API,
 -- this automatically requires your server-side handler to be a function
 -- that takes an argument of type @['Text']@.
@@ -554,6 +598,10 @@ instance (KnownSymbol sym, FromText a, HasServer sublayout)
           convert Nothing = Nothing
           convert (Just v) = fromText v
 
+instance (KnownSymbol sym, FromText a, HasServerT sublayout)
+      => HasServerT (MatrixParams sym a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
+
 -- | If you use @'MatrixFlag' "published"@ in one of the endpoints for your API,
 -- this automatically requires your server-side handler to be a function
 -- that takes an argument of type 'Bool'.
@@ -587,6 +635,10 @@ instance (KnownSymbol sym, HasServer sublayout)
     where paramname = cs $ symbolVal (Proxy :: Proxy sym)
           examine v | v == "true" || v == "1" || v == "" = True
                     | otherwise = False
+
+instance (KnownSymbol sym, HasServerT sublayout)
+      => HasServerT (MatrixFlag sym :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
 
 -- | Just pass the request to the underlying application and serve its response.
 --
@@ -624,10 +676,14 @@ instance (FromJSON a, HasServer sublayout)
     a -> ServerT sublayout m
 
   route Proxy subserver request respond = do
-    mrqbody <- liftIO $ eitherDecode' <$> lazyRequestBody request
+    mrqbody <- eitherDecode' <$> lazyRequestBody request
     case mrqbody of
       Left e -> respond . failWith $ InvalidBody e
       Right v  -> route (Proxy :: Proxy sublayout) (subserver v) request respond
+
+instance (FromJSON a, HasServerT sublayout)
+      => HasServerT (ReqBody a :> sublayout) where
+  enter Proxy run f a = enter (Proxy :: Proxy sublayout) run (f a)
 
 -- | Make sure the incoming request starts with @"/path"@, strip it and
 -- pass the rest of the request path to @sublayout@.
@@ -642,3 +698,6 @@ instance (KnownSymbol path, HasServer sublayout) => HasServer (path :> sublayout
     _ -> respond $ failWith NotFound
 
     where proxyPath = Proxy :: Proxy path
+
+instance (KnownSymbol path, HasServerT sublayout) => HasServerT (path :> sublayout) where
+  enter Proxy run a = enter (Proxy :: Proxy sublayout) run a
