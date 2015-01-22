@@ -10,7 +10,7 @@ module Servant.ServerSpec where
 
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Either (EitherT, left)
-import Control.Monad.Trans.State (StateT, evalStateT)
+import Control.Monad.Trans.State (State, evalState)
 import qualified Control.Monad.Trans.State as State (modify, get)
 import Data.Aeson (ToJSON, FromJSON, encode, decode')
 import Data.Char (toUpper)
@@ -375,7 +375,7 @@ type MonadApi = "foo" :> Get Integer
 monadApi :: Proxy MonadApi
 monadApi = Proxy
 
-monadServer :: ServerT MonadApi (StateT Integer IO)
+monadServer :: ServerT MonadApi (State Integer)
 monadServer = lift $ do
   State.modify (+ 13)
   State.modify (* 2)
@@ -384,7 +384,7 @@ monadServer = lift $ do
 monadSpec :: Spec
 monadSpec = do
   describe "serveT with StateT monad" $ do
-    with (return $ serveT monadApi (flip evalStateT 8) monadServer) $ do
+    with (return $ serveT monadApi (return . flip evalState 8) monadServer) $ do
       it "runs monadic computations" $ do
         get "/foo" `shouldRespondWith` "42"
       it "state is local to requests" $ do
@@ -401,7 +401,7 @@ enterApi = Proxy
 enterServer :: Server EnterApi
 enterServer =
        return 42
-  :<|> enter monadApi (flip evalStateT 6) monadServer
+  :<|> enter monadApi (return . flip evalState 6) monadServer
 
 enterSpec :: Spec
 enterSpec = do
