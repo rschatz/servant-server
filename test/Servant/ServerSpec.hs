@@ -386,3 +386,7 @@ monadSpec = do
     with (return $ serveT (flip evalStateT 8) monadApi monadServer) $ do
       it "runs monadic computations" $ do
         get "/foo" `shouldRespondWith` "42"
+      it "state is local to requests" $ do
+        get "/foo" `shouldRespondWith` "42"
+        get "/foo" `shouldRespondWith` "42"
+        get "/foo" `shouldRespondWith` "42"
